@@ -1,0 +1,12 @@
+torch>=2.3
+transformers>=4.45
+accelerate>=0.34
+datasets>=2.20
+safetensors>=0.4.5
+tokenizers>=0.20
+numpy>=1.26
+tqdm>=4.66
+pyyaml>=6.0
+einops>=0.8
+psutil>=5.9
+pytest>=8.0

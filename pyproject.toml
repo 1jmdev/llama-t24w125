@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llama-t24w125"
+version = "0.1.0"
+description = "T2:4 ternary 1.25-bit conversion and QAT post-training for Llama-family causal LMs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Generated repo"}]
+dependencies = [
+  "torch>=2.3",
+  "transformers>=4.45",
+  "accelerate>=0.34",
+  "datasets>=2.20",
+  "safetensors>=0.4.5",
+  "tokenizers>=0.20",
+  "numpy>=1.26",
+  "tqdm>=4.66",
+  "pyyaml>=6.0",
+  "einops>=0.8",
+  "psutil>=5.9"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+triton = ["triton>=2.3"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.setuptools.packages.find]
+include = ["t24w125*"]
