@@ -83,10 +83,14 @@ def main() -> None:
     output_dir = Path(args.output_dir or tcfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=dtype,
+        dtype=dtype,
         trust_remote_code=mcfg.get("trust_remote_code", False),
+        attn_implementation=mcfg.get("attn_implementation", "sdpa"),
     )
     replaced = replace_linear_with_t24(model, qcfg, skip_names=cfg["quant"].get("skip_names", []))
     set_t24_alpha(model, 0.0)
@@ -135,6 +139,9 @@ def main() -> None:
         pin_memory=device.type == "cuda",
         drop_last=False,
     )
+
+    baseline = evaluate(model, eval_loader, device, dtype, 8)
+    print(json.dumps({"dense_baseline_before_qat": baseline}), flush=True)
 
     muon_params, adamw_params = split_muon_adamw_params(model)
     opt_muon = Muon(
@@ -204,7 +211,9 @@ def main() -> None:
     while step < max_steps:
         for batch in loader:
             if quant_warmup_steps > 0:
-                a = quant_start_alpha + (quant_end_alpha - quant_start_alpha) * min(1.0, step / quant_warmup_steps)
+                t = min(1.0, step / quant_warmup_steps)
+                t = t * t
+                a = quant_start_alpha + (quant_end_alpha - quant_start_alpha) * t
             else:
                 a = quant_end_alpha
             set_t24_alpha(model, a)

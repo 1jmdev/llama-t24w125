@@ -102,7 +102,7 @@ def split_muon_adamw_params(model: torch.nn.Module):
         if not p.requires_grad:
             continue
         lowered = name.lower()
-        if p.ndim >= 2 and all(k not in lowered for k in ("embed", "lm_head")):
+        if p.ndim >= 2 and all(k not in lowered for k in ("embed", "lm_head", "scales")):
             muon_params.append(p)
         else:
             adamw_params.append(p)

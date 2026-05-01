@@ -21,17 +21,16 @@ class TokenBlockDataset(Dataset):
             self.meta = {}
             dtype = np.uint32
         self.tokens = np.memmap(self.token_file, dtype=dtype, mode="r")
-        self.n = max(0, (len(self.tokens) - 1) // seq_len)
+        self.n = max(0, len(self.tokens) // seq_len)
 
     def __len__(self) -> int:
         return self.n
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         start = idx * self.seq_len
-        arr = np.asarray(self.tokens[start : start + self.seq_len + 1], dtype=np.int64)
-        x = torch.from_numpy(arr[:-1].copy())
-        y = torch.from_numpy(arr[1:].copy())
-        return {"input_ids": x, "labels": y}
+        arr = np.asarray(self.tokens[start : start + self.seq_len], dtype=np.int64)
+        x = torch.from_numpy(arr.copy())
+        return {"input_ids": x, "labels": x.clone()}
 
 
 class StreamingTokenBlockDataset(IterableDataset):

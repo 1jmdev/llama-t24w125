@@ -80,7 +80,11 @@ def quantize_t24_dense(weight: torch.Tensor, cfg: QuantConfig) -> torch.Tensor:
 
 
 @torch.no_grad()
-def pack_t24(weight: torch.Tensor, cfg: QuantConfig) -> dict[str, torch.Tensor | int | str]:
+def pack_t24(
+    weight: torch.Tensor,
+    cfg: QuantConfig,
+    scale_override: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor | int | str]:
     """Pack a dense weight into T2:4 codes.
 
     Each four-weight block is encoded as one 5-bit logical code:
@@ -110,9 +114,14 @@ def pack_t24(weight: torch.Tensor, cfg: QuantConfig) -> dict[str, torch.Tensor |
 
     mask = torch.zeros_like(wb, dtype=torch.bool).scatter_(-1, top2_sorted, True)
     signed = torch.where(mask, wb.sign(), torch.zeros_like(wb))
-    numerator = (wb * signed).sum(dim=(-1, -2))
-    denominator = signed.abs().sum(dim=(-1, -2)).clamp_min(cfg.eps)
-    scale = (numerator / denominator).clamp_min(cfg.eps).to(cfg.torch_scale_dtype).contiguous()
+    if scale_override is None:
+        numerator = (wb * signed).sum(dim=(-1, -2))
+        denominator = signed.abs().sum(dim=(-1, -2)).clamp_min(cfg.eps)
+        scale = (numerator / denominator).clamp_min(cfg.eps)
+    else:
+        scale = scale_override.detach().float().clamp_min(cfg.eps)
+
+    scale = scale.to(cfg.torch_scale_dtype).contiguous()
 
     sign0 = signed.gather(-1, top2_sorted[..., 0:1]).squeeze(-1).lt(0).to(torch.uint8)
     sign1 = signed.gather(-1, top2_sorted[..., 1:2]).squeeze(-1).lt(0).to(torch.uint8)

@@ -10,6 +10,27 @@ import torch.nn.functional as F
 from .quant import QuantConfig, pack_t24, quantize_t24_ste, unpack_t24
 
 
+@torch.no_grad()
+def _t24_signed_mask_and_scale(weight: torch.Tensor, cfg: QuantConfig):
+    orig_shape = weight.shape
+    pad = (-weight.shape[1]) % cfg.scale_group_size
+    w = F.pad(weight.detach().float(), (0, pad)) if pad else weight.detach().float()
+
+    out_features, in_padded = w.shape
+    groups = in_padded // cfg.scale_group_size
+    blocks_per_group = cfg.scale_group_size // 4
+    wb = w.view(out_features, groups, blocks_per_group, 4)
+
+    idx = wb.abs().topk(k=2, dim=-1, largest=True, sorted=False).indices
+    mask = torch.zeros_like(wb, dtype=torch.bool).scatter_(-1, idx, True)
+    signed = torch.where(mask, wb.sign(), torch.zeros_like(wb))
+
+    numerator = (wb * signed).sum(dim=(-1, -2))
+    denominator = signed.abs().sum(dim=(-1, -2)).clamp_min(cfg.eps)
+    scales = (numerator / denominator).clamp_min(cfg.eps)
+
+    return signed.to(dtype=weight.dtype), scales.to(dtype=weight.dtype), pad, orig_shape
+
 class T24LinearSTE(nn.Module):
     """Training-time fake-quantized linear layer.
 
@@ -32,6 +53,9 @@ class T24LinearSTE(nn.Module):
         self.cfg = cfg or QuantConfig()
         self.register_buffer("quant_alpha", torch.tensor(1.0, dtype=torch.float32), persistent=False)
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype, device=device))
+        padded_in = in_features + ((-in_features) % self.cfg.scale_group_size)
+        scale_groups = padded_in // self.cfg.scale_group_size
+        self.scales = nn.Parameter(torch.ones(out_features, scale_groups, dtype=dtype, device=device))
         self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device)) if bias else None
         self.reset_parameters()
 
@@ -53,19 +77,31 @@ class T24LinearSTE(nn.Module):
             device=linear.weight.device,
         )
         mod.weight.data.copy_(linear.weight.data)
+        _, init_scales, _, _ = _t24_signed_mask_and_scale(linear.weight.data, cfg)
+        mod.scales.data.copy_(init_scales.to(device=mod.scales.device, dtype=mod.scales.dtype))
         if linear.bias is not None and mod.bias is not None:
             mod.bias.data.copy_(linear.bias.data)
         return mod
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q = quantize_t24_ste(self.weight, self.cfg)
+        signed, _, pad, _ = _t24_signed_mask_and_scale(self.weight, self.cfg)
+
+        scale = self.scales.clamp_min(self.cfg.eps).to(dtype=self.weight.dtype)
+        q = signed * scale[:, :, None, None]
+        q = q.view(self.out_features, -1)
+        if pad:
+            q = q[:, :-pad]
+
+        q_ste = self.weight + (q - self.weight).detach() + (q - q.detach())
+
         alpha = self.quant_alpha.to(device=self.weight.device, dtype=self.weight.dtype)
-        qw = self.weight + alpha * (q - self.weight)
+        qw = self.weight + alpha * (q_ste - self.weight)
+
         return F.linear(x, qw, self.bias)
 
     @torch.no_grad()
     def pack(self) -> dict:
-        payload = pack_t24(self.weight, self.cfg)
+        payload = pack_t24(self.weight, self.cfg, scale_override=self.scales)
         if self.bias is not None:
             payload["bias"] = self.bias.detach().cpu()
         return payload
