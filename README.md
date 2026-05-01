@@ -110,7 +110,7 @@ This loads Llama 3.2 1B, replaces eligible `nn.Linear` layers with `T24LinearSTE
 ```bash
 python scripts/03_posttrain_qat.py \
   --config configs/llama32_1b_t24_qat.yaml \
-  --token-file data/ultrafineweb_llama32_10gb/tokens.bin \
+  --token-file data/fineweb_10gb/tokens.bin \
   --output-dir outputs/llama32_1b_t24_qat
 ```
 

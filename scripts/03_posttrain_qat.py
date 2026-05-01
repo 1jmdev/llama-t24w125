@@ -13,7 +13,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
 from t24w125.data import TokenBlockDataset
-from t24w125.modules import replace_linear_with_t24
+from t24w125.modules import replace_linear_with_t24, set_t24_alpha
 from t24w125.muon import Muon, split_muon_adamw_params
 from t24w125.quant import QuantConfig, theoretical_bits_per_weight
 from t24w125.utils import get_amp_dtype, load_config, save_json, seed_everything
@@ -89,10 +89,14 @@ def main() -> None:
         trust_remote_code=mcfg.get("trust_remote_code", False),
     )
     replaced = replace_linear_with_t24(model, qcfg, skip_names=cfg["quant"].get("skip_names", []))
+    set_t24_alpha(model, 0.0)
+
     if mcfg.get("gradient_checkpointing", True):
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
+
     model.to(device)
+
     if args.compile or mcfg.get("torch_compile", False):
         model = torch.compile(model)
 
@@ -102,12 +106,19 @@ def main() -> None:
     train_len = len(dataset) - eval_len
     if train_len <= 0:
         raise RuntimeError("Token dataset is too small. Run 01_prepare_ultrafineweb.py first.")
+
     train_ds, eval_ds = random_split(
         dataset,
         [train_len, eval_len],
         generator=torch.Generator().manual_seed(int(tcfg.get("seed", 1337))),
     )
+
     batch_size = int(args.batch_size or tcfg.get("batch_size", 1))
+    grad_accum = int(args.grad_accum_steps or tcfg.get("grad_accum_steps", 16))
+    max_steps = int(args.max_steps or tcfg.get("max_steps", 10000))
+    optimizer_steps = max(1, math.ceil(max_steps / grad_accum))
+    warmup = min(int(tcfg.get("warmup_steps", 20)), max(1, optimizer_steps // 10))
+
     loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -128,7 +139,7 @@ def main() -> None:
     muon_params, adamw_params = split_muon_adamw_params(model)
     opt_muon = Muon(
         muon_params,
-        lr=float(tcfg.get("learning_rate_muon", 0.015)),
+        lr=float(tcfg.get("learning_rate_muon", 0.006)),
         momentum=float(tcfg.get("muon_momentum", 0.95)),
         weight_decay=float(tcfg.get("weight_decay", 0.01)),
         ns_steps=int(tcfg.get("muon_ns_steps", 5)),
@@ -139,10 +150,9 @@ def main() -> None:
         betas=(0.9, 0.95),
         weight_decay=float(tcfg.get("weight_decay", 0.01)),
     )
-    max_steps = int(args.max_steps or tcfg.get("max_steps", 2000))
-    warmup = int(tcfg.get("warmup_steps", 100))
-    sched_muon = get_cosine_schedule_with_warmup(opt_muon, warmup, max_steps)
-    sched_adamw = get_cosine_schedule_with_warmup(opt_adamw, warmup, max_steps)
+
+    sched_muon = get_cosine_schedule_with_warmup(opt_muon, warmup, optimizer_steps)
+    sched_adamw = get_cosine_schedule_with_warmup(opt_adamw, warmup, optimizer_steps)
 
     start_step = 0
     if args.resume_state:
@@ -164,29 +174,49 @@ def main() -> None:
         "bits_per_weight_including_fp16_scales": theoretical_bits_per_weight(qcfg.scale_group_size),
         "muon_params": sum(p.numel() for p in muon_params),
         "adamw_params": sum(p.numel() for p in adamw_params),
+        "grad_accum_steps": grad_accum,
+        "micro_steps": max_steps,
+        "optimizer_steps": optimizer_steps,
+        "warmup_optimizer_steps": warmup,
+        "quant_warmup_steps": int(tcfg.get("quant_warmup_steps", 4000)),
+        "quant_start_alpha": float(tcfg.get("quant_start_alpha", 0.0)),
+        "quant_end_alpha": float(tcfg.get("quant_end_alpha", 1.0)),
     }
     save_json(output_dir / "train_report.json", report)
     print(json.dumps(report, indent=2))
 
-    grad_accum = int(args.grad_accum_steps or tcfg.get("grad_accum_steps", 16))
     log_every = int(tcfg.get("log_every", 10))
     eval_every = int(tcfg.get("eval_every", 250))
     save_every = int(tcfg.get("save_every", 500))
     max_grad_norm = float(tcfg.get("max_grad_norm", 1.0))
+    quant_warmup_steps = int(tcfg.get("quant_warmup_steps", 4000))
+    quant_start_alpha = float(tcfg.get("quant_start_alpha", 0.0))
+    quant_end_alpha = float(tcfg.get("quant_end_alpha", 1.0))
+
     step = start_step
     accum_loss = 0.0
     t0 = time.time()
     model.train()
+    opt_muon.zero_grad(set_to_none=True)
+    opt_adamw.zero_grad(set_to_none=True)
 
     pbar = tqdm(total=max_steps, initial=start_step, desc="QAT")
     while step < max_steps:
         for batch in loader:
+            if quant_warmup_steps > 0:
+                a = quant_start_alpha + (quant_end_alpha - quant_start_alpha) * min(1.0, step / quant_warmup_steps)
+            else:
+                a = quant_end_alpha
+            set_t24_alpha(model, a)
+
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with torch.autocast(device_type="cuda", dtype=dtype, enabled=device.type == "cuda" and dtype != torch.float32):
                 out = model(**batch)
                 loss = out.loss / grad_accum
+
             loss.backward()
             accum_loss += float(loss.detach().cpu())
+
             if (step + 1) % grad_accum == 0:
                 if max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -199,15 +229,27 @@ def main() -> None:
 
             step += 1
             pbar.update(1)
+
             if step % log_every == 0:
                 toks = step * batch_size * seq_len
                 elapsed = max(1e-6, time.time() - t0)
-                print(json.dumps({"step": step, "loss": accum_loss / log_every * grad_accum, "tok_s": toks / elapsed}))
+                print(
+                    json.dumps(
+                        {
+                            "step": step,
+                            "loss": accum_loss / log_every * grad_accum,
+                            "quant_alpha": a,
+                            "tok_s": toks / elapsed,
+                        }
+                    )
+                )
                 accum_loss = 0.0
+
             if eval_every and step % eval_every == 0:
                 metrics = evaluate(model, eval_loader, device, dtype, int(tcfg.get("eval_batches", 64)))
                 save_json(output_dir / f"eval_step_{step}.json", metrics)
                 print(json.dumps({"eval_step": step, **metrics}))
+
             if save_every and step % save_every == 0:
                 save_checkpoint(
                     output_dir / f"checkpoint_step_{step}.pt",
@@ -215,10 +257,12 @@ def main() -> None:
                     [opt_muon, opt_adamw],
                     [sched_muon, sched_adamw],
                     step,
-                    {"loss_recent": accum_loss},
+                    {"loss_recent": accum_loss, "quant_alpha": a},
                 )
+
             if step >= max_steps:
                 break
+
     pbar.close()
     save_checkpoint(output_dir / "checkpoint_final.pt", model, [opt_muon, opt_adamw], [sched_muon, sched_adamw], step, {})
     AutoTokenizer.from_pretrained(model_name, use_fast=True).save_pretrained(output_dir / "tokenizer")

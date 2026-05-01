@@ -30,6 +30,7 @@ class T24LinearSTE(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.cfg = cfg or QuantConfig()
+        self.register_buffer("quant_alpha", torch.tensor(1.0, dtype=torch.float32), persistent=False)
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype, device=device))
         self.bias = nn.Parameter(torch.empty(out_features, dtype=dtype, device=device)) if bias else None
         self.reset_parameters()
@@ -57,7 +58,9 @@ class T24LinearSTE(nn.Module):
         return mod
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        qw = quantize_t24_ste(self.weight, self.cfg)
+        q = quantize_t24_ste(self.weight, self.cfg)
+        alpha = self.quant_alpha.to(device=self.weight.device, dtype=self.weight.dtype)
+        qw = self.weight + alpha * (q - self.weight)
         return F.linear(x, qw, self.bias)
 
     @torch.no_grad()
@@ -121,3 +124,10 @@ def iter_t24_modules(model: nn.Module):
     for name, module in model.named_modules():
         if isinstance(module, T24LinearSTE):
             yield name, module
+
+
+@torch.no_grad()
+def set_t24_alpha(model: nn.Module, alpha: float) -> None:
+    alpha = max(0.0, min(1.0, float(alpha)))
+    for _, module in iter_t24_modules(model):
+        module.quant_alpha.fill_(alpha)

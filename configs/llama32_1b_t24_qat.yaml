@@ -13,13 +13,12 @@ quant:
     - lm_head
     - embed_tokens
 
-# Dataset defaults point at the public Ultra-FineWeb repo. Some mirrors/configs may require accepting HF terms.
 data:
-  dataset_name: openbmb/Ultra-FineWeb
-  dataset_config: null
+  dataset_name: HuggingFaceFW/fineweb
+  dataset_config: sample-10BT
   split: train
   text_column: text
-  output_dir: data/ultrafineweb_llama32_10gb
+  output_dir: data/fineweb_10gb
   max_raw_gb: 10
   seq_len: 2048
   token_dtype: uint32
@@ -29,16 +28,19 @@ data:
 train:
   output_dir: outputs/llama32_1b_t24_qat
   seed: 1337
-  max_steps: 2000
-  warmup_steps: 100
+  max_steps: 10000
+  warmup_steps: 20
   batch_size: 1
   grad_accum_steps: 16
-  learning_rate_muon: 0.015
+  learning_rate_muon: 0.006
   learning_rate_adamw: 2.0e-5
   weight_decay: 0.01
   muon_momentum: 0.95
   muon_ns_steps: 5
   max_grad_norm: 1.0
+  quant_warmup_steps: 4000
+  quant_start_alpha: 0.0
+  quant_end_alpha: 1.0
   save_every: 500
   eval_every: 250
   eval_batches: 64
