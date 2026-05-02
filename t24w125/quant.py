@@ -126,8 +126,9 @@ def pack_t24(
     sign0 = signed.gather(-1, top2_sorted[..., 0:1]).squeeze(-1).lt(0).to(torch.uint8)
     sign1 = signed.gather(-1, top2_sorted[..., 1:2]).squeeze(-1).lt(0).to(torch.uint8)
     codes = (pair_code | (sign0 << 3) | (sign1 << 4)).contiguous()
-    codes = codes.view(out_features, total_blocks_per_row).cpu()
+    codes = codes.view(out_features, total_blocks_per_row).contiguous()
     bitstream = pack_5bit_codes(codes.flatten()).cpu()
+    codes = codes.cpu()
 
     return {
         "codes_u8": codes,
@@ -177,34 +178,65 @@ def unpack_t24(packed: dict[str, torch.Tensor | int | str], device: torch.device
 
 
 def pack_5bit_codes(codes: torch.Tensor) -> torch.Tensor:
-    codes_cpu = codes.to(device="cpu", dtype=torch.uint8).flatten()
-    n = codes_cpu.numel()
-    out = torch.zeros((n * 5 + 7) // 8, dtype=torch.uint8)
-    bit_pos = 0
-    for value in codes_cpu.tolist():
-        v = int(value) & 0x1F
-        byte_idx = bit_pos // 8
-        offset = bit_pos % 8
-        out[byte_idx] |= (v << offset) & 0xFF
-        if offset > 3:
-            out[byte_idx + 1] |= (v >> (8 - offset)) & 0xFF
-        bit_pos += 5
-    return out
+    c = codes.to(dtype=torch.uint8).flatten() & 0x1F
+    n = c.numel()
+    pad = (-n) % 8
+
+    if pad:
+        c = torch.cat([c, torch.zeros(pad, dtype=torch.uint8, device=c.device)])
+
+    c64 = c.view(-1, 8).to(torch.int64)
+
+    v = (
+        c64[:, 0]
+        | (c64[:, 1] << 5)
+        | (c64[:, 2] << 10)
+        | (c64[:, 3] << 15)
+        | (c64[:, 4] << 20)
+        | (c64[:, 5] << 25)
+        | (c64[:, 6] << 30)
+        | (c64[:, 7] << 35)
+    )
+
+    out = torch.empty((c64.shape[0], 5), dtype=torch.uint8, device=c.device)
+    out[:, 0] = (v >> 0).to(torch.uint8)
+    out[:, 1] = (v >> 8).to(torch.uint8)
+    out[:, 2] = (v >> 16).to(torch.uint8)
+    out[:, 3] = (v >> 24).to(torch.uint8)
+    out[:, 4] = (v >> 32).to(torch.uint8)
+
+    return out.flatten()[: (n * 5 + 7) // 8].contiguous()
 
 
 def unpack_5bit_codes(bitstream: torch.Tensor, n_codes: int) -> torch.Tensor:
-    bs = bitstream.to(device="cpu", dtype=torch.uint8).flatten()
-    out = torch.empty(n_codes, dtype=torch.uint8)
-    bit_pos = 0
-    for i in range(n_codes):
-        byte_idx = bit_pos // 8
-        offset = bit_pos % 8
-        value = int(bs[byte_idx]) >> offset
-        if offset > 3 and byte_idx + 1 < bs.numel():
-            value |= int(bs[byte_idx + 1]) << (8 - offset)
-        out[i] = value & 0x1F
-        bit_pos += 5
-    return out
+    bs = bitstream.to(dtype=torch.uint8).flatten()
+    n_groups = (n_codes + 7) // 8
+    need_bytes = n_groups * 5
+
+    if bs.numel() < need_bytes:
+        bs = torch.cat([bs, torch.zeros(need_bytes - bs.numel(), dtype=torch.uint8, device=bs.device)])
+
+    b = bs[:need_bytes].view(-1, 5).to(torch.int64)
+
+    v = (
+        b[:, 0]
+        | (b[:, 1] << 8)
+        | (b[:, 2] << 16)
+        | (b[:, 3] << 24)
+        | (b[:, 4] << 32)
+    )
+
+    out = torch.empty((n_groups, 8), dtype=torch.uint8, device=bs.device)
+    out[:, 0] = ((v >> 0) & 0x1F).to(torch.uint8)
+    out[:, 1] = ((v >> 5) & 0x1F).to(torch.uint8)
+    out[:, 2] = ((v >> 10) & 0x1F).to(torch.uint8)
+    out[:, 3] = ((v >> 15) & 0x1F).to(torch.uint8)
+    out[:, 4] = ((v >> 20) & 0x1F).to(torch.uint8)
+    out[:, 5] = ((v >> 25) & 0x1F).to(torch.uint8)
+    out[:, 6] = ((v >> 30) & 0x1F).to(torch.uint8)
+    out[:, 7] = ((v >> 35) & 0x1F).to(torch.uint8)
+
+    return out.flatten()[:n_codes].contiguous()
 
 
 def theoretical_bits_per_weight(scale_group_size: int, scale_bits: int = 16) -> float:

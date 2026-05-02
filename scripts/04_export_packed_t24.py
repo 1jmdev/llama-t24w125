@@ -97,7 +97,21 @@ def main() -> None:
         metadata["non_quantized_tensors"].append(key)
 
     packed_path = output_dir / "model_t24w125.safetensors"
-    save_file(tensors, packed_path, metadata={"format": "T24W125"})
+    safe_tensors = {}
+    seen_ptrs = set()
+
+    for name, tensor in tensors.items():
+        tensor = tensor.detach().cpu().contiguous()
+        ptr = tensor.untyped_storage().data_ptr()
+
+        if ptr in seen_ptrs:
+            tensor = tensor.clone()
+
+        seen_ptrs.add(ptr)
+        safe_tensors[name] = tensor
+
+    save_file(safe_tensors, packed_path, metadata={"format": "T24W125"})
+
     AutoConfig.from_pretrained(model_name).save_pretrained(output_dir)
     AutoTokenizer.from_pretrained(model_name, use_fast=True).save_pretrained(output_dir)
     metadata["safetensors_sha256"] = sha256_file(packed_path)

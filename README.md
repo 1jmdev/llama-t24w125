@@ -74,14 +74,14 @@ Default config uses `openbmb/Ultra-FineWeb`. Some mirrors/configs may require ac
 python scripts/01_prepare_ultrafineweb.py \
   --config configs/llama32_1b_t24_qat.yaml \
   --max-raw-gb 10 \
-  --output-dir data/ultrafineweb_llama32_10gb
+  --output-dir data/fineweb_10gb
 ```
 
 This creates:
 
 ```text
-data/ultrafineweb_llama32_10gb/tokens.bin
-data/ultrafineweb_llama32_10gb/tokens.bin.json
+data/fineweb_10gb/tokens.bin
+data/fineweb_10gb/tokens.bin.json
 ```
 
 If the official repo layout changes, override the dataset fields:
